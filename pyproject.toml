@@ -1,0 +1,31 @@
+[project]
+name = "hcurl"
+version = "0.1.0"
+description = "curl wrapper that renders HTML and JSON responses nicely in the terminal"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Pouria Mortezaagha" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "markdownify>=1.2.4",
+    "rich>=15.0.0",
+]
+
+[project.scripts]
+hcurl = "hcurl.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.17",
+    "mypy>=2.4.1",
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.6",
+]
