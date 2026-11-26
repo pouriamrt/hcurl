@@ -6,6 +6,8 @@
 
 ![hcurl rendering a JSON response](docs/json.png)
 
+![hcurl highlighting a TOML file served as text/plain](docs/code.png)
+
 ## Install
 
 Requires Python 3.14+, [uv](https://docs.astral.sh/uv/) and `curl` on your PATH.
