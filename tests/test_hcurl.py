@@ -4,9 +4,10 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from rich.console import Console, RenderableType
+from rich.syntax import Syntax
 
 from hcurl import cli
-from hcurl.render import html_to_markdown, kind_of, render
+from hcurl.render import HIGHLIGHT_LIMIT, html_to_markdown, kind_of, render
 from hcurl.view import Meta, header, human_size, status_badge
 
 PAGE = b"""<!DOCTYPE html><html><head><title>Demo</title><style>body{color:red}</style>
@@ -227,3 +228,95 @@ def test_tidy_collapses_spaces_but_not_in_code_or_tables() -> None:
 
     md = "a  b   (c)\n\n```\nx  =  1\n```\n\n| k  | v |\n| --- | --- |"
     assert tidy(md) == "a b (c)\n\n```\nx  =  1\n```\n\n| k  | v |\n| --- | --- |"
+
+
+def lexer_of(body: bytes, content_type: str, url: str = "") -> str | None:
+    rendered = render(body, content_type, url)
+    if rendered is None:
+        return None
+    assert isinstance(rendered.body, Syntax)
+    return rendered.body.lexer.aliases[0] if rendered.body.lexer else None
+
+
+@pytest.mark.parametrize(
+    ("content_type", "url", "lexer"),
+    [
+        ("text/css", "", "css"),
+        ("application/javascript; charset=utf-8", "", "javascript"),
+        ("application/xml", "", "xml"),
+        ("application/x-yaml", "", "yaml"),
+        ("text/plain", "https://raw.test/a/b.py", "python"),
+        ("", "file:///tmp/main.rs", "rust"),
+        ("text/xml", "https://x.test/feed.php", "xml"),  # declared type beats URL
+        ("text/plain", "https://x.test/notes", None),
+        ("text/plain", "https://x.test/readme.txt", None),
+        ("application/octet-stream", "https://x.test/blob", None),
+        ("image/svg+xml", "", "xml"),
+        ("text/plain", "http://host[1-3].test/a.py", None),  # curl glob, not a URL
+        ("text/plain", "https://x.test/a.py?v=2#top", "python"),
+    ],
+)
+def test_code_bodies_are_highlighted(content_type: str, url: str, lexer: str) -> None:
+    assert lexer_of(b"x = 1\n", content_type, url) == lexer
+
+
+def test_declared_type_is_not_overridden_by_content() -> None:
+    assert lexer_of(b"<root><a/></root>", "text/css") == "css"
+
+
+def test_highlighted_body_keeps_text_and_strips_escapes() -> None:
+    out = body_text(b"body { color: red }\n/* \x1b]0;pwned\x07 */", "text/css")
+    assert "color: red" in out and "\x1b" not in out and "\x07" not in out
+
+
+@pytest.mark.parametrize(
+    "body", [b"\x00\x01binary", b"a" * (HIGHLIGHT_LIMIT + 1)], ids=["binary", "huge"]
+)
+def test_binary_or_huge_code_is_not_highlighted(body: bytes) -> None:
+    assert render(body, "text/css") is None
+
+
+def test_main_shows_spinner_and_reports_curl_errors(monkeypatch, capsys):
+    statuses = []
+    real_status = Console.status
+
+    def spy(self, status, **kwargs):
+        statuses.append(status)
+        return real_status(self, status, **kwargs)
+
+    monkeypatch.setattr(Console, "status", spy)
+    monkeypatch.setattr(cli, "stdout_is_tty", lambda: True)
+    url = "file:///definitely/missing/[red]file.css"
+    assert cli.main([url]) != 0
+    assert [s.plain for s in statuses] == [f"Fetching {url}"]  # Text: no markup
+    assert "curl:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["-u", "ann", "u"], True),
+        (["-uann", "u"], True),
+        (["--user=ann", "u"], True),
+        (["--proxy-user", "ann", "u"], True),
+        (["-u"], True),
+        (["-u", "ann:pw", "u"], False),
+        (["--user=ann:pw", "u"], False),
+        (["--user-agent", "x", "u"], False),
+        (["-sSL", "u"], False),
+        (["-E", "c.pem", "u"], True),
+        (["--key=k.pem", "--cert", "c.pem", "u"], True),
+        (["--key", "k.pem", "--pass", "pw", "u"], False),
+        (["--cert-type", "PEM", "--cacert", "ca.pem", "u"], False),
+        (["-T", "-", "u"], True),
+        (["-d", "@-", "u"], True),
+        (["-F", "f=<-", "u"], True),
+        (["-d", "a=1", "u"], False),
+    ],
+)
+def test_needs_tty(args: list[str], expected: bool) -> None:
+    assert cli.needs_tty(args, stdin_is_tty=True) is expected
+
+
+def test_piped_stdin_body_keeps_spinner() -> None:
+    assert cli.needs_tty(["-d", "@-", "u"], stdin_is_tty=False) is False

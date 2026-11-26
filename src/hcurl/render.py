@@ -1,14 +1,17 @@
 """Turn an HTTP response body into rich renderables."""
 
 import json
+import mimetypes
 import re
 from typing import NamedTuple
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup, Tag
 from markdownify import markdownify
 from rich.console import RenderableType
 from rich.json import JSON
 from rich.markdown import Markdown
+from rich.syntax import Syntax
 
 # Tags whose content is never readable text in a terminal (media, widgets, forms).
 NOISE_TAGS = (
@@ -21,6 +24,23 @@ LAYOUT_TABLE_TAGS = ("thead", "tbody", "tfoot", "tr", "td")
 HTML_TYPES = ("text/html", "application/xhtml+xml")
 SNIFF_BYTES = 512
 CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # keeps \t and \n
+BINARY_PROBE = 1024
+# Highlighting + wrapping costs ~0.5 s per 44 KB (3 s at 220 KB); past this, print raw.
+HIGHLIGHT_LIMIT = 64 * 1024
+CODE_THEME = "one-dark"
+CODE_BACKGROUND = "#1f2335"  # same as inline code in view.THEME
+# mimetypes has no extension for these, or a misleading one (application/xml -> .xsl).
+MIME_EXTENSIONS = {
+    "application/javascript": ".js",
+    "image/svg+xml": ".xml",
+    "application/xml": ".xml",
+    "application/x-yaml": ".yaml",
+    "text/yaml": ".yaml",
+    "application/toml": ".toml",
+    "application/sql": ".sql",
+    "application/graphql": ".graphql",
+}
+PLAIN_LEXERS = ("default", "text")
 
 
 def kind_of(content_type: str, body: bytes) -> str:
@@ -43,6 +63,26 @@ def kind_of(content_type: str, body: bytes) -> str:
             return "raw"
         return "json"
     return "raw"
+
+
+def is_binary(body: bytes) -> bool:
+    return b"\x00" in body[:BINARY_PROBE]
+
+
+def lexer_for(content_type: str, url: str, code: str) -> str | None:
+    """Pygments lexer for a text body: declared type first, then the URL's extension."""
+    mime = content_type.split(";")[0].strip().lower()
+    extension = MIME_EXTENSIONS.get(mime) or mimetypes.guess_extension(mime) or ""
+    # Declared type: by extension only. Content sniffing turns CSS into "css+genshi".
+    lexer = Syntax.guess_lexer("body" + extension)
+    if lexer in PLAIN_LEXERS:
+        try:
+            path = urlsplit(url).path
+        except ValueError:  # curl glob like "http://host[1-3].com/" isn't a valid URL
+            path = ""
+        # URL extension: content breaks ties between lexers sharing it (.h: C/C++/ObjC).
+        lexer = Syntax.guess_lexer(path, code)
+    return None if lexer in PLAIN_LEXERS else lexer
 
 
 def decode(body: bytes, content_type: str) -> str:
@@ -107,7 +147,7 @@ class Rendered(NamedTuple):
     body: RenderableType
 
 
-def render(body: bytes, content_type: str) -> Rendered | None:
+def render(body: bytes, content_type: str, url: str = "") -> Rendered | None:
     """Title and rich renderable for the body, or None when it should be written raw."""
     kind = kind_of(content_type, body)
     text = decode(body, content_type)
@@ -119,5 +159,19 @@ def render(body: bytes, content_type: str) -> Rendered | None:
     if kind == "html":
         title, markdown = html_to_markdown(text)
         empty = "_(empty page: it may need JavaScript to render)_"
-        return Rendered(title, Markdown(markdown or empty))
-    return None
+        return Rendered(title, Markdown(markdown or empty, code_theme=CODE_THEME))
+    if is_binary(body) or len(body) > HIGHLIGHT_LIMIT:
+        return None
+    lexer = lexer_for(content_type, url, text)
+    if lexer is None:
+        return None
+    return Rendered(
+        "",
+        Syntax(
+            text,
+            lexer,
+            theme=CODE_THEME,
+            word_wrap=True,
+            background_color=CODE_BACKGROUND,
+        ),
+    )
